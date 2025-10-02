@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 from collections import OrderedDict
@@ -58,6 +59,7 @@ from services.types import (
 CHECK_INTERVAL_SECONDS = 60 * 60
 UPDATE_THRESHOLD_SECONDS = 24 * 60 * 60
 MAX_TELEGRAM_MESSAGES_PER_SECOND = 25
+MIN_DB_FILE_SIZE_BYTES = 1 * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -522,6 +524,11 @@ async def ensure_database_fresh(session: aiohttp.ClientSession, path: str, url: 
         logger.info("%s not found. Downloading.", file_path)
         await download_database(session, file_path, url)
         return
+    size_bytes = os.path.getsize(file_path)
+    if size_bytes < MIN_DB_FILE_SIZE_BYTES:
+        logger.warning("%s is too small (%s bytes). Re-downloading.", file_path, size_bytes)
+        await download_database(session, file_path, url)
+        return
     age_seconds = time.time() - os.path.getmtime(file_path)
     if age_seconds <= UPDATE_THRESHOLD_SECONDS:
         return
@@ -531,13 +538,25 @@ async def ensure_database_fresh(session: aiohttp.ClientSession, path: str, url: 
 
 async def download_database(session: aiohttp.ClientSession, path: str, url: str) -> None:
     logger.info("Downloading %s to %s", url, path)
-    async with session.get(url) as response:
-        response.raise_for_status()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as handle:
-            async for chunk in response.content.iter_chunked(1024 * 1024):
-                handle.write(chunk)
-    logger.info("Geo database %s updated", path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path: str | None = None
+    try:
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with session.get(url, timeout=timeout) as response:
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(mode="wb", delete=False, dir=os.path.dirname(path)) as handle:
+                temp_path = handle.name
+                async for chunk in response.content.iter_chunked(1024 * 1024):
+                    handle.write(chunk)
+        os.replace(temp_path, path)
+        logger.info("Geo database %s updated", path)
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
 
 async def updater_loop(stop_event: asyncio.Event) -> None:
@@ -557,14 +576,53 @@ def _format_proxy_comment(payload: ProxyPayload, default_country: str | None) ->
     comment = payload.get("comment")
     if comment and payload.get("comment_truncated"):
         comment = f"{comment}…"
-    country = payload.get("sni") or payload.get("host")
+
+    def _clean(value: object | None, uppercase: bool = False) -> str | None:
+        if value in (None, "", "-"):
+            return None
+        text = str(value)
+        return text.upper() if uppercase else text
+
+    headline_parts: list[str] = []
+
     if default_country:
         flag = country_flag(default_country)
         name = country_name(default_country)
-        if comment:
-            return f"{flag}{name}, {comment}".strip()
-        return f"{flag}{name}".strip()
-    return comment or "Proxy"
+        country_part = " ".join(part for part in (flag, name) if part).strip()
+        if country_part:
+            headline_parts.append(country_part)
+
+    protocol = _clean(payload.get("protocol"), uppercase=True)
+    if protocol:
+        headline_parts.append(protocol)
+
+    server = _clean(payload.get("server")) or _clean(payload.get("host"))
+    port = _clean(payload.get("port"))
+    if server:
+        endpoint = f"{server}:{port}" if port else server
+        headline_parts.append(endpoint)
+
+    connection_type = _clean(payload.get("type"))
+    if connection_type:
+        headline_parts.append(connection_type)
+
+    security = _clean(payload.get("security"))
+    if security:
+        headline_parts.append(security)
+
+    if comment:
+        headline_parts.append(comment)
+
+    if headline_parts:
+        seen: set[str] = set()
+        unique_parts: list[str] = []
+        for part in headline_parts:
+            if part not in seen:
+                seen.add(part)
+                unique_parts.append(part)
+        return " • ".join(unique_parts)
+
+    return "Proxy"
 
 
 def format_proxy_message(
@@ -577,7 +635,7 @@ def format_proxy_message(
 
     lines = []
     if extra_header:
-        lines.append(extra_header)
+        lines.append(f"🔝 {extra_header}")
         lines.append("")
 
     lines.append("🔗 Proxy:")
