@@ -1,84 +1,71 @@
+from __future__ import annotations
+
+from http import HTTPStatus
+
 import aiohttp
-import asyncio
+from aiohttp import ClientSession
 
-from config.variables import IPREGISTRY_API_TOKEN
+from services.types import IPRegistryInfo, SecurityFlags
 
-async def get_ipregistry_info(ip: str) -> dict:
 
-    url = f"https://api.ipregistry.co/{ip}?key={IPREGISTRY_API_TOKEN}"
+async def get_ipregistry_info(session: ClientSession, api_token: str | None, ip: str) -> IPRegistryInfo:
+    url = f"https://api.ipregistry.co/{ip}"
+    params = {"key": api_token} if api_token else {}
 
-    info = {
+    info: IPRegistryInfo = {
         "ip": ip,
-        "type": None,
-        "hostname": None,
-        "city": None,
-        "region": None,
-        "region_code": None,
-        "country": None,
-        "country_code": None,
-        "latitude": None,
-        "longitude": None,
-        "asn_number": None,
-        "asn_org": None,
-        "network": None,
-        "security": {
-            "is_abuser": False,
-            "is_attacker": False,
-            "is_bogon": False,
-            "is_cloud_provider": False,
-            "is_proxy": False,
-            "is_relay": False,
-            "is_tor": False,
-            "is_tor_exit": False,
-            "is_vpn": False,
-            "is_anonymous": False,
-            "is_threat": False
-        },
-        "request_error": None
+        "security": {},
     }
 
-    timeout = aiohttp.ClientTimeout(total=5)
+    if not api_token:
+        info["request_error"] = "IPRegistry token is not configured"
+        return info
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                data = await response.json()
-                if not isinstance(data, dict):
-                    info["request_error"] = "Invalid JSON response"
-                    return info
+        async with session.get(url, params=params) as response:
+            if response.status != HTTPStatus.OK:
+                info["request_error"] = f"HTTP error: {response.status}"
+                return info
 
-                location = data.get("location", {})
-                region = location.get("region", {})
-                info.update({
-                    "type": data.get("type"),
-                    "hostname": data.get("hostname"),
-                    "city": location.get("city"),
-                    "region": region.get("name"),
-                    "region_code": region.get("code"),
-                    "country": location.get("country", {}).get("name"),
-                    "country_code": location.get("country", {}).get("code"),
-                    "latitude": location.get("latitude"),
-                    "longitude": location.get("longitude")
-                })
+            data = await response.json()
+            if not isinstance(data, dict):
+                info["request_error"] = "Invalid JSON response"
+                return info
 
-                connection = data.get("connection", {})
-                info.update({
-                    "asn_number": connection.get("asn"),
-                    "asn_org": connection.get("organization"),
-                    "network": connection.get("route"),
-                    "type": connection.get("type")
-                })
+            location = data.get("location", {})
+            region = location.get("region", {})
+            country = location.get("country", {})
+            info.update({
+                "type": data.get("type"),
+                "hostname": data.get("hostname"),
+                "city": location.get("city"),
+                "region": region.get("name"),
+                "region_code": region.get("code"),
+                "country": country.get("name"),
+                "country_code": country.get("code"),
+                "latitude": location.get("latitude"),
+                "longitude": location.get("longitude"),
+            })
 
-                security = data.get("security", {})
-                for key in info["security"].keys():
-                    info["security"][key] = security.get(key, False)
+            connection = data.get("connection", {})
+            info.update({
+                "asn_number": connection.get("asn"),
+                "asn_org": connection.get("organization"),
+                "network": connection.get("route"),
+                "type": connection.get("type", info.get("type")),
+            })
 
-    except aiohttp.ClientResponseError as e:
-        info["request_error"] = f"HTTP error: {e.status} {e.message}"
-    except aiohttp.ClientError as e:
-        info["request_error"] = f"Client error: {str(e)}"
-    except Exception as e:
-        info["request_error"] = f"Unexpected error: {str(e)}"
+            security_data = data.get("security", {})
+            security: SecurityFlags = {}
+            for key in ("is_abuser", "is_attacker", "is_bogon", "is_cloud_provider", "is_proxy", "is_relay", "is_tor", "is_tor_exit", "is_vpn", "is_anonymous", "is_threat"):
+                security[key] = bool(security_data.get(key, False))
+            info["security"] = security
+
+    except aiohttp.ClientResponseError as exc:
+        info["request_error"] = f"HTTP error: {exc.status} {exc.message}"
+    except aiohttp.ClientError as exc:
+        info["request_error"] = f"Client error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        info["request_error"] = f"Unexpected error: {exc}"
 
     return info

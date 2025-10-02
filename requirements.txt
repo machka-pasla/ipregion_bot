@@ -1,5 +1,5 @@
-aiogram
-aiohttp
-geoip2
-pycountry
-tldextract
+aiohttp==3.9.5
+aiogram==3.4.1
+geoip2==4.8.0
+pycountry==24.6.1
+tldextract==5.1.1

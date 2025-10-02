@@ -1,15 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.12-alpine AS builder
 
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apk add --no-cache build-base libffi-dev openssl-dev
+
+WORKDIR /build
+
+COPY requirements.txt ./
+RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+
+FROM python:3.12-alpine
+
+ENV PYTHONUNBUFFERED=1
+
+RUN adduser -D app
 WORKDIR /app
 
-COPY requirements.txt .
+COPY --from=builder /install /usr/local/
+COPY . .
+RUN mkdir -p databases && chown -R app:app /app
 
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY main.py .
-COPY config/ ./config/
-COPY services/ ./services/
-
-RUN mkdir ./databases
+USER app
 
 CMD ["python", "main.py"]
