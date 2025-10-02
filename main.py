@@ -274,7 +274,7 @@ def _country_line(code: str | None, region: str | None = None, city: str | None 
         return None
     flag = country_flag(code)
     name = country_name(code)
-    parts = [f"{flag}{code}".strip(), name]
+    parts = [f"{flag} {code}".strip(), name]
     if region:
         parts.append(region)
     if city and city != region:
@@ -397,7 +397,11 @@ def build_report(resolution: ResolutionResult, info: HostInfo) -> str:
         aka = rdap.get("aka")
         if aka:
             rdap_lines.append(aka)
-        lines.extend([""] + _section("Registration:", rdap_lines))
+        source = rdap.get("source")
+        title = "Registration:"
+        if isinstance(source, str) and source:
+            title = f"Registration ({source.upper()}):"
+        lines.extend([""] + _section(title, rdap_lines))
 
     ipregistry = info.get("ipregistry", {})
     if isinstance(ipregistry, dict):
@@ -416,6 +420,8 @@ def build_report(resolution: ResolutionResult, info: HostInfo) -> str:
             security_lines = [f"{label}: {'✅' if value else '❌'}" for label, value in checks.items()]
             lines.extend([""] + _section("VPN Info (ipregistry.co):", security_lines))
 
+    header: str | None = None
+    footer_note: str | None = None
     if resolution["is_domain"]:
         puny = _to_punycode(resolution["host"])
         ext = tldextract.extract(puny)
@@ -428,12 +434,30 @@ def build_report(resolution: ResolutionResult, info: HostInfo) -> str:
         else:
             whois_link = f"https://info.addr.tools/{root}"
         header = f"🔗 <b>Host:</b> {resolution['host']} (<a href='{whois_link}'>Whois</a>?)"
-        footer = []
         if resolution["ech_supported"]:
-            footer.append("✅ ECH is supported")
-        lines = [header, ""] + lines + footer
+            footer_note = "✅ ECH is supported"
 
-    return "\n".join([ip_line] + lines).strip()
+    separator = "----------------"
+    report_lines: list[str] = []
+    if header:
+        report_lines.append(header)
+
+    report_lines.append(separator)
+    report_lines.append(ip_line)
+
+    if lines:
+        if lines[0] != "":
+            report_lines.append("")
+        report_lines.extend(lines)
+
+    if footer_note:
+        if report_lines and report_lines[-1] != "":
+            report_lines.append("")
+        report_lines.append(footer_note)
+
+    report_lines.append(separator)
+
+    return "\n".join(report_lines).strip()
 
 
 async def gather_host_entries(session: aiohttp.ClientSession, target: str) -> list[dict[str, str | None]]:
